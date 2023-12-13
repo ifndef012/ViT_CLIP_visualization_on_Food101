@@ -24,6 +24,13 @@ from transformers import CLIPProcessor, CLIPModel
 import pickle
 import random
 
+# CLIP model reference: https://huggingface.co/openai/clip-vit-base-patch32
+# ViT-base model reference: https://huggingface.co/google/vit-base-patch16-224-in21k
+# ViT-tiny model https://huggingface.co/WinKawaks/vit-tiny-patch16-224
+# Food 101 dataset reference: https://data.vision.ee.ethz.ch/cvl/datasets_extra/food-101/
+
+
+# Convert the model name to a shorter alias for visualization
 model_alias = {
     'thhsieh/vit_base_food101_finetune': 'vit_base_finetune',
     'thhsieh/vit_tiny_food101_finetuned': 'vit_tiny_finetune',
@@ -31,6 +38,7 @@ model_alias = {
     'thhsieh/vit_scratch_food101_resume_1': 'vit_base_scratch'
 }
 
+# Reference https://jacobgil.github.io/deeplearning/vision-transformer-explainability
 def attention_rollout(model, input_):
     model.config.output_attentions = True
     with torch.no_grad():
@@ -49,6 +57,7 @@ def attention_rollout(model, input_):
         mask_normalized = (mask - mask.min()) / (mask.max() - mask.min())
         return mask_normalized
 
+# Put the mask on the image
 def apply_mask(mask, img):
     h_img, w_img, c = img.shape
     mask = cv2.resize(mask, (w_img, h_img))
@@ -61,38 +70,54 @@ def apply_mask(mask, img):
 def load_model(checkpoint):
     return AutoModelForImageClassification.from_pretrained(checkpoint)
 
-def post_process(img):
+def post_process(img): # De-normalize the image tensor and swap the axes to fit opencv
     return img.squeeze(0).permute(1, 2, 0) * 0.5 + 0.5
 
 
 if __name__ == '__main__':
+    # Select gpu if cuda is available
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+    # Load the failed samples from previously saved pickle file
     with open('failed_samples.pkl', mode='rb') as f:
         failed = pickle.load(f)
 
+    # Load the food 101 dataset
     food101 = load_dataset('food101')
+    # We only need the validation set for visualization
     dataset = food101['validation']
 
+    # Draw 3 samples for each model
     num_samples = 3
+
+    # Load the CLIP model
     checkpoint_clip = 'openai/clip-vit-base-patch32'
     ref = failed.pop(checkpoint_clip)
     model_clip = CLIPModel.from_pretrained(checkpoint_clip).to(device)
 
+    # Get the 101 class names for CLIP model prediction
     class_names = dataset.features['label'].names
+
+    # Store the figures for later saving
     figures = {}
 
+    # All the samples' indices
     idx_all = set(range(len(dataset)))
 
+    # Iterate through all the failed samples
     for ckpt, target in failed.items():
+        # Load the ViT model and their image processor
         image_processor = AutoImageProcessor.from_pretrained(ckpt)
         model = load_model(ckpt).to(device)
         model.eval()
 
+        # Collect ViT correct & CLIP failed samples
         correct = random.sample(list((idx_all - target) & ref), num_samples)
+        # Collect ViT failed & CLIP correct samples
         wrong = random.sample(list(target & (idx_all - ref)), num_samples)
 
         with torch.no_grad():
+            # Create the figure for ViT model correct & CLIP model failed
             fig, axes = plt.subplots(nrows=3, ncols=3, constrained_layout=True, figsize=(10, 10))
             fig.suptitle(f'{model_alias[ckpt]} correct | clip_model failed')
             for ax in axes.flat:
@@ -100,11 +125,18 @@ if __name__ == '__main__':
                 ax.get_yaxis().set_ticks([])
             figures[f'{ckpt}/correct'] = fig
 
+            # Iterate through the samples which ViT model correct and CLIP model failed
             for col, idx in enumerate(correct):
+                # Get the sample
                 data = dataset[idx]
+                # Preprocess the image
                 img = image_processor(images=data['image'], return_tensors='pt')['pixel_values']
+                # Draw the attention map
                 mask_target = attention_rollout(model, img)
+                # Apply the attention map on the image
                 cam_target = apply_mask(mask_target.numpy(), post_process(img).numpy())
+
+                # Display the attention maps and the image
                 axes[1, col].imshow(cam_target)
                 axes[1, col].set_xlabel(f'{model_alias[ckpt]}')
 
@@ -119,6 +151,7 @@ if __name__ == '__main__':
                 axes[0, col].set_title(f'{class_names[data["label"]]}')
                 axes[0, col].set_xlabel('origin image')
 
+            # Create the figure for ViT model failed & CLIP model correct
             fig, axes = plt.subplots(nrows=3, ncols=3, constrained_layout=True, figsize=(10, 10))
             fig.suptitle(f'{model_alias[ckpt]} failed | clip_model correct')
             for ax in axes.flat:
@@ -126,11 +159,18 @@ if __name__ == '__main__':
                 ax.get_yaxis().set_ticks([])
             figures[f'{ckpt}/wrong'] = fig
 
+            # Iterate through the samples which ViT model failed and CLIP model correct
             for col, idx in enumerate(wrong):
+                # Get the sample
                 data = dataset[idx]
+                # Preprocess the image
                 img = image_processor(images=data['image'], return_tensors='pt')['pixel_values']
+                # Draw the attention map
                 mask_target = attention_rollout(model, img)
+                # Apply the attention map on the image
                 cam_target = apply_mask(mask_target.numpy(), post_process(img).numpy())
+
+                # Display the attention maps and the image
                 axes[1, col].imshow(cam_target)
                 axes[1, col].set_xlabel(f'{model_alias[ckpt]}')
 
@@ -145,6 +185,7 @@ if __name__ == '__main__':
                 axes[0, col].set_title(f'{class_names[data["label"]]}')
                 axes[0, col].set_xlabel('origin image')
 
+    # Save the figures
     for name, fig in figures.items():
         filename = name.replace('/', '_')
         fig.savefig(f'{filename}.png')

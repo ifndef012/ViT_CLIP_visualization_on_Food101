@@ -15,7 +15,16 @@ from huggingface_hub import notebook_login
 import torch
 from argparse import ArgumentParser
 
+# CLIP model reference: https://huggingface.co/openai/clip-vit-base-patch32
+# ViT-base model reference: https://huggingface.co/google/vit-base-patch16-224-in21k
+# ViT-tiny model https://huggingface.co/WinKawaks/vit-tiny-patch16-224
+# Food 101 dataset reference: https://data.vision.ee.ethz.ch/cvl/datasets_extra/food-101/
+
+# Image classification reference: https://huggingface.co/docs/transformers/tasks/image_classification
+
 def parse_args():
+    """ Parse command line arguments
+    """
     parser = ArgumentParser()
     parser.add_argument('--checkpoint_dir', type=str, default='vit_base_finetune', help='Checkpoint directory')
     parser.add_argument('--model_name', type=str, default='google/vit-base-patch16-224-in21k', help='Model to use')
@@ -24,6 +33,8 @@ def parse_args():
 
 
 def get_compute_metrics_fn():
+    """ Get the compute metrics function for Trainer.
+    """
     accuracy = evaluate.load('accuracy')
     def compute_metrics(eval_pred):
         predictions, labels = eval_pred
@@ -32,7 +43,10 @@ def get_compute_metrics_fn():
     return compute_metrics
 
 def get_train_transform(checkpoint: str):
+    # Load the image processor
     image_processor = AutoImageProcessor.from_pretrained(checkpoint)
+
+    # Define the transforms
     _transforms = tv_transforms.Compose([
         tv_transforms.RandomAffine(degrees=10, shear=5),
         tv_transforms.RandomHorizontalFlip(p=0.5),
@@ -41,6 +55,7 @@ def get_train_transform(checkpoint: str):
         tv_transforms.transforms.Normalize(mean=image_processor.image_mean, std=image_processor.image_std)
     ])
 
+    # Define the transform function
     def transform_data(data):
       data['pixel_values'] = [_transforms(img.convert('RGB')) for img in data.pop('image')]
       return data
@@ -49,13 +64,17 @@ def get_train_transform(checkpoint: str):
 
 
 def get_val_transform(checkpoint: str):
+    # Load the image processor
     image_processor = AutoImageProcessor.from_pretrained(checkpoint)
+
+    # Define the transforms
     _transforms = tv_transforms.Compose([
         tv_transforms.transforms.Resize(size=(image_processor.size['height'], image_processor.size['width'])),
         tv_transforms.transforms.ToTensor(),
         tv_transforms.transforms.Normalize(mean=image_processor.image_mean, std=image_processor.image_std)
     ])
 
+    # Define the transform function
     def transform_data(data):
       data['pixel_values'] = [_transforms(img.convert('RGB')) for img in data.pop('image')]
       return data
@@ -63,25 +82,33 @@ def get_val_transform(checkpoint: str):
     return transform_data
 
 def load_untrained_model(checkpoint: str, num_labels: int):
+    # Load the config
     config = AutoConfig.from_pretrained(checkpoint, num_labels=num_labels)
+    # Load the model from config, this will initialize the model with random weights
     model = AutoModelForImageClassification.from_config(config)
     return model
 
 def load_pretrained_model(checkpoint: str, num_labels: int):
+    # Load the model from checkpoint with pre-trained weights
     model = AutoModelForImageClassification.from_pretrained(checkpoint, num_labels=num_labels)
     return model
 
 if __name__ == '__main__':
     args = parse_args()
+    # Define the model loading function
     load_model = load_untrained_model if args.from_scratch else load_pretrained_model
 
+    # Select gpu if cuda is available
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+    # load the dataset
     food101 = load_dataset('food101')
 
+    # Define the training and validation dataset with transform
     dataset_train = food101['train'].with_transform(get_train_transform(args.model_name))
     dataset_val = food101['validation'].with_transform(get_val_transform(args.model_name))
 
+    # Define the training arguments
     training_args = TrainingArguments(
         output_dir=f'{args.checkpoint_dir}',
         remove_unused_columns=False, # Keep this
@@ -102,8 +129,10 @@ if __name__ == '__main__':
         hub_strategy='checkpoint'
     )
 
+    # load the model
     model = load_model(args.model_name, num_labels=dataset_train.features['label'].num_classes).to(device)
 
+    # Define the trainer
     trainer = Trainer(
         model=model,
         args=training_args,
@@ -114,5 +143,5 @@ if __name__ == '__main__':
         compute_metrics=get_compute_metrics_fn(),
     )
 
-
+    # Start training
     trainer.train()

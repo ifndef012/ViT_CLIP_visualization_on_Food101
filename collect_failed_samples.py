@@ -23,6 +23,14 @@ from transformers import CLIPProcessor, CLIPModel
 import pickle
 import random
 
+# CLIP model reference: https://huggingface.co/openai/clip-vit-base-patch32
+# ViT-base model reference: https://huggingface.co/google/vit-base-patch16-224-in21k
+# ViT-tiny model https://huggingface.co/WinKawaks/vit-tiny-patch16-224
+# Food 101 dataset reference: https://data.vision.ee.ethz.ch/cvl/datasets_extra/food-101/
+
+
+
+# List of our trained vit models
 VIT_MODEL_LIST = [
     'thhsieh/vit_base_food101_finetune',
     'thhsieh/vit_tiny_food101_finetuned',
@@ -30,6 +38,7 @@ VIT_MODEL_LIST = [
     'thhsieh/vit_scratch_food101_resume_1'
 ]
 
+# Pack the dataset into batches for vit models
 def batchify_vit(dataset, image_processor, batch_size):
     for i in range(0, len(dataset), batch_size):
         batch = dataset[i:i + batch_size]
@@ -38,6 +47,7 @@ def batchify_vit(dataset, image_processor, batch_size):
         idxs = torch.arange(i, i + labels.size(0))
         yield idxs, imgs, labels
 
+# Pack the dataset into batches for CLIP model
 def batchify_clip(dataset, batch_size):
     for i in range(0, len(dataset), batch_size):
         batch = dataset[i:i + batch_size]
@@ -46,12 +56,14 @@ def batchify_clip(dataset, batch_size):
         idxs = torch.arange(i, i + labels.size(0))
         yield idxs, imgs, labels
 
+
 def load_model(checkpoint):
     return AutoModelForImageClassification.from_pretrained(checkpoint)
 
+# Collect failed samples from ViT models and CLIP model (zero-shot)
 def collect_failed_samples(model_list: list[str], dataset, batch_size: int, device):
     failed = defaultdict(list)
-    for checkpoint in model_list:
+    for checkpoint in model_list: # Iterate through all ViT models
         image_processor = AutoImageProcessor.from_pretrained(checkpoint)
         model = load_model(checkpoint).to(device)
         model.eval()
@@ -62,7 +74,7 @@ def collect_failed_samples(model_list: list[str], dataset, batch_size: int, devi
                     failed[checkpoint].extend(idxs[torch.nonzero(logits.argmax(-1) != labels).flatten()].tolist())
                     pbar.update(logits.size(0))
 
-
+    # Collect failed samples from CLIP model (zero-shot)
     checkpoint_clip = 'openai/clip-vit-base-patch32'
     texts = [n.replace('_', ' ') for n in dataset.features['label'].names]
     processor_clip = CLIPProcessor.from_pretrained(checkpoint_clip)
@@ -80,16 +92,22 @@ def collect_failed_samples(model_list: list[str], dataset, batch_size: int, devi
     return failed
 
 if __name__ == '__main__':
+    # Select gpu if cuda is available
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+    # load the dataset
     food101 = load_dataset('food101')
 
+    # Evaluate on the validation set
     dataset_val = food101['validation']
 
+    # Get the failed samples' indices
     failed = collect_failed_samples(VIT_MODEL_LIST, dataset_val, 512, device)
 
+    # Convert the failed samples indices to set
     for key in failed.keys():
         failed[key] = set(failed[key])
 
+    # Save the failed samples for later visualization
     with open('failed_samples.pkl', mode='wb') as f:
         pickle.dump(failed, f)
